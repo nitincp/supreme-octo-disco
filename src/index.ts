@@ -1,6 +1,5 @@
 import faker from "faker";
 import ExcelJS from "exceljs";
-import { fstat } from "fs";
 
 interface Person {
   id: number;
@@ -26,6 +25,13 @@ interface Row<T> {
   cells: Cell<T>[]
 }
 
+type Rows<T> = Row<T>[];
+
+interface RowsWithRange<T> { 
+  rows: Rows<T>,
+  range: Range
+}
+
 interface Column<T> {
   name: string;
   value<V>(item: T): V
@@ -33,8 +39,8 @@ interface Column<T> {
 
 interface TableConfig<T> {
   getColumns?: (item: T) => Column<T>[],
-  getHeader?: (columns: Column<T>[]) => Row<string>[]
-  getStartAt?: () => Position
+  getHeader?: (columns: Column<T>[]) => RowsWithRange<string>
+  startAt?: Position
 }
 
 const firstPosition: Position = { row: 1, column: 1 };
@@ -58,26 +64,43 @@ function getProperty<T, K extends keyof T>(o: T, propertyName: K): T[K] {
   return o[propertyName]; // o[propertyName] is of type T[K]
 }
 
-function getRows<T>(collection: T[], columns: Column<T>[], startAt: Position = firstPosition): Row<T>[] {
+function getBody<T>(collection: T[], columns: Column<T>[], startAt: Position = firstPosition) {
 
-  let rowNum = startAt.row;
-  return collection.map(item => {
+  let lastRowRange: Range = { min: startAt, max: startAt };
+  
+  const rows = collection.map(item => {
+    const rowStartAt = lastRowRange.max == startAt ? startAt : { row: lastRowRange.max.row + 1, column: lastRowRange.min.column };
+    const { rows, range } = getRow<T>(item, columns, rowStartAt);
+    lastRowRange = range;
+    return rows;
+  }).reduce((pv, cv) => ([...pv, ...cv]));
 
-    let colNum = startAt.column;
-    const cells = columns.map<Cell<T>>(col => ({ row: rowNum, column: colNum++, value: col.value(item) }));
-    rowNum++;
-    return { cells };
-  });
+  const range = { min: startAt, max: lastRowRange.max };
+  return { rows, range };
 }
 
-function getHeader<T>(columns: Column<T>[], startAt: Position = firstPosition): Row<string>[] {
-
+function getRow<T>(item: T, columns: Column<T>[], startAt: Position): RowsWithRange<T> {
+  let rowNum = startAt.row;
   let colNum = startAt.column;
-  return [
+  const cells = columns.map<Cell<T>>(col => ({ row: rowNum, column: colNum++, value: col.value(item) }));
+  const rows = [{ cells }];
+  const range: Range = { min: startAt, max: { row: rowNum, column: colNum - 1 } }
+  return { rows, range };
+}
+
+function getHeader<T>(columns: Column<T>[], startAt: Position = firstPosition) {
+
+  let rowNum = startAt.row;
+  let colNum = startAt.column;
+  const rows: Rows<string> = [
     {
-      cells: columns.map(c => ({ row: startAt.row, column: colNum++, value: c.name }))
+      cells: columns.map(c => ({ row: rowNum, column: colNum++, value: c.name }))
     }
   ];
+
+  const range: Range = { min: startAt, max: { row: rowNum, column: colNum - 1 } }
+
+  return { rows, range };
 }
 
 function getCellsArea<T>(cells: Cell<T>[]) {
@@ -98,7 +121,7 @@ function getCellsArea<T>(cells: Cell<T>[]) {
   }, defaultArea);
 }
 
-function getNextPosition<T>(rows: Row<T>[]): Position {
+function getNextPosition<T>(rows: Rows<T>): Position {
 
   const allCells = rows.reduce((pv, cv) => {
     return [...pv, ...cv.cells];
@@ -117,7 +140,7 @@ function printRow<T>(row: Row<T>) {
   console.log(print);
 }
 
-function plot<T>(rows: Row<T>[], ws: ExcelJS.Worksheet) {
+function plot<T>(rows: Rows<T>, ws: ExcelJS.Worksheet) {
   rows.forEach(row => {
     // printRow(row);
     row.cells.forEach(cell => {
@@ -143,11 +166,7 @@ function getTable<T>(collection: T[], config?: TableConfig<T>) {
 
   const columns = config.getColumns(collection[0]);
 
-  if (!config.getStartAt) {
-    config.getStartAt = () => firstPosition;
-  }
-
-  const startAt = config.getStartAt();
+  const startAt = config.startAt || firstPosition;
 
   if (!config.getHeader) {
     config.getHeader = (columns) => getHeader(columns, startAt)
@@ -155,11 +174,25 @@ function getTable<T>(collection: T[], config?: TableConfig<T>) {
 
   const header = config.getHeader(columns);
 
-  const rowsStartAt = getNextPosition(header);
+  const bodyStartsAt: Position = { row: header.range.max.row + 1, column: header.range.min.column } // getNextPosition(header);
 
-  const rows = getRows(collection, columns, rowsStartAt);
+  const body = getBody(collection, columns, bodyStartsAt);
 
-  return [...header, ...rows];
+  return [...header.rows, ...body.rows];
+}
+
+function groupBy<T, K>(list: T[], keyGetter: (item: T) => K) {
+  const map = new Map<K, T[]>();
+  list.forEach((item) => {
+       const key = keyGetter(item);
+       const collection = map.get(key);
+       if (!collection) {
+           map.set(key, [item]);
+       } else {
+           collection.push(item);
+       }
+  });
+  return map;
 }
 
 function getRandomData(total = 10) {
@@ -180,9 +213,8 @@ const ws = wb.addWorksheet('My Book');
 const people: Person[] = getRandomData();
 
 plot(getTable(getRandomData()), ws);
-plot(getTable(getRandomData(), { getStartAt: () => ({ row: 3, column: 5 }) }), ws);
-plot(getTable(getRandomData(), { getStartAt: () => ({ row: 15, column: 1 }) }), ws);
-plot(getTable(getRandomData(100), { getStartAt: () => ({ row: 15, column: 5 }) }), ws);
-
+plot(getTable(getRandomData(), { startAt: { row: 3, column: 5 } }), ws);
+plot(getTable(getRandomData(), { startAt: { row: 15, column: 1 } }), ws);
+plot(getTable(getRandomData(100), { startAt: { row: 15, column: 5 } }), ws);
 
 wb.xlsx.writeFile(`out/${faker.system.commonFileName('xlsx')}`);
