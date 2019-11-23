@@ -27,7 +27,7 @@ interface Row<T> {
 
 type Rows<T> = Row<T>[];
 
-interface RowsWithRange<T> { 
+interface RowsWithRange<T> {
   rows: Rows<T>,
   range: Range
 }
@@ -35,12 +35,6 @@ interface RowsWithRange<T> {
 interface Column<T> {
   name: string;
   value<V>(item: T): V
-}
-
-interface TableConfig<T> {
-  getColumns?: (item: T) => Column<T>[],
-  getHeader?: (columns: Column<T>[]) => RowsWithRange<string>
-  startAt?: Position
 }
 
 const firstPosition: Position = { row: 1, column: 1 };
@@ -67,7 +61,7 @@ function getProperty<T, K extends keyof T>(o: T, propertyName: K): T[K] {
 function getBody<T>(collection: T[], columns: Column<T>[], startAt: Position = firstPosition) {
 
   let lastRowRange: Range = { min: startAt, max: startAt };
-  
+
   const rows = collection.map(item => {
     const rowStartAt = lastRowRange.max == startAt ? startAt : { row: lastRowRange.max.row + 1, column: lastRowRange.min.column };
     const { rows, range } = getRow<T>(item, columns, rowStartAt);
@@ -103,45 +97,13 @@ function getHeader<T>(columns: Column<T>[], startAt: Position = firstPosition) {
   return { rows, range };
 }
 
-function getCellsArea<T>(cells: Cell<T>[]) {
-
-  const defaultArea: Range = { min: cells[0], max: cells[0] };
-
-  return cells.reduce((pv, cv) => {
-    return {
-      min: {
-        row: pv.min.row > cv.row ? cv.row : pv.min.row,
-        column: pv.min.column > cv.column ? cv.column : pv.min.column
-      },
-      max: {
-        row: pv.max.row < cv.row ? cv.row : pv.max.row,
-        column: pv.max.column < cv.column ? cv.column : pv.max.column
-      }
-    };
-  }, defaultArea);
-}
-
-function getNextPosition<T>(rows: Rows<T>): Position {
-
-  const allCells = rows.reduce((pv, cv) => {
-    return [...pv, ...cv.cells];
-  }, [] as Cell<T>[]);
-
-  const cellsArea = getCellsArea<T>(allCells);
-
-  return {
-    row: cellsArea.max.row + 1,
-    column: cellsArea.min.column
-  }
-}
-
 function printRow<T>(row: Row<T>) {
   const print = row.cells.map(cell => `(${cell.row},${cell.column})${cell.value}`).join('\t')
   console.log(print);
 }
 
-function plot<T>(rows: Rows<T>, ws: ExcelJS.Worksheet) {
-  rows.forEach(row => {
+function plot<T>(rowsWithRange: RowsWithRange<T>, ws: ExcelJS.Worksheet) {
+  rowsWithRange.rows.forEach(row => {
     // printRow(row);
     row.cells.forEach(cell => {
       ws.getCell(cell.row, cell.column).value = cell.value as any;
@@ -149,48 +111,97 @@ function plot<T>(rows: Rows<T>, ws: ExcelJS.Worksheet) {
   });
 }
 
+type KeyGetter<T, K> = (item: T) => K;
+
+interface TableConfig<T> {
+  columns?: Column<T>[],
+  getHeader?: (columns: Column<T>[], startAt: Position) => RowsWithRange<string>
+  startAt?: Position,
+  groupBy?: (item: T) => any
+}
 
 function getTable<T>(collection: T[], config?: TableConfig<T>) {
-
-  if (!collection || collection.length == 0) {
-    return [];
-  }
 
   if (!config) {
     config = {};
   }
 
-  if (!config.getColumns) {
-    config.getColumns = (item) => getColumns(item);
+  const startAt = config.startAt || firstPosition;
+
+  if (!collection || collection.length == 0) {
+    return { rows: [], range: { min: startAt, max: startAt } } as RowsWithRange<T>;
   }
 
-  const columns = config.getColumns(collection[0]);
+  if (!config.columns) {
+    config.columns = getColumns(collection[0]);
+  }
 
-  const startAt = config.startAt || firstPosition;
+  const columns = config.columns;
 
   if (!config.getHeader) {
     config.getHeader = (columns) => getHeader(columns, startAt)
   }
 
-  const header = config.getHeader(columns);
+  const header = config.getHeader(columns, startAt);
 
-  const bodyStartsAt: Position = { row: header.range.max.row + 1, column: header.range.min.column } // getNextPosition(header);
+  let body: RowsWithRange<T>;
 
-  const body = getBody(collection, columns, bodyStartsAt);
+  if (config.groupBy) {
+    let lastGroupRange = header.range;
+    const groups = groupBy(collection, config.groupBy);
+    const groupRows: Rows<T> = [];
+    groups.forEach((groupCollection, groupKey) => {
+      
+      const groupStartsAt: Position = { row: lastGroupRange.max.row + 1, column: lastGroupRange.min.column }
+      
+      const groupTable = getTable(groupCollection, {
+        columns,
+        getHeader: (columns, startAt) => {
+          return {
+            rows: [
+              {
+                cells: [
+                  {
+                    value: groupKey,
+                    row: groupStartsAt.row,
+                    column: groupStartsAt.column
+                  }
+                ]
+              }
+            ],
+            range: { min: groupStartsAt, max: groupStartsAt }
+          };
+        }, // getHeader(columns, groupStartsAt),
+        startAt: groupStartsAt
+      });
 
-  return [...header.rows, ...body.rows];
+      groupRows.push(...groupTable.rows);
+      lastGroupRange = groupTable.range;
+    });
+
+    body = { rows: groupRows, range: { min: { row: header.range.max.row + 1, column: header.range.min.column }, max: lastGroupRange.max } }
+
+  } else {
+    const bodyStartsAt: Position = { row: header.range.max.row + 1, column: header.range.min.column } // getNextPosition(header);
+    body = getBody(collection, columns, bodyStartsAt);
+  }
+
+  const rows = [...header.rows, ...body.rows];
+  const range: Range = { min: startAt, max: body.range.max };
+  const table: RowsWithRange<T> = { rows, range };
+  return table;
 }
 
 function groupBy<T, K>(list: T[], keyGetter: (item: T) => K) {
   const map = new Map<K, T[]>();
   list.forEach((item) => {
-       const key = keyGetter(item);
-       const collection = map.get(key);
-       if (!collection) {
-           map.set(key, [item]);
-       } else {
-           collection.push(item);
-       }
+    const key = keyGetter(item);
+    const collection = map.get(key);
+    if (!collection) {
+      map.set(key, [item]);
+    } else {
+      collection.push(item);
+    }
   });
   return map;
 }
@@ -213,8 +224,13 @@ const ws = wb.addWorksheet('My Book');
 const people: Person[] = getRandomData();
 
 plot(getTable(getRandomData()), ws);
-plot(getTable(getRandomData(), { startAt: { row: 3, column: 5 } }), ws);
-plot(getTable(getRandomData(), { startAt: { row: 15, column: 1 } }), ws);
-plot(getTable(getRandomData(100), { startAt: { row: 15, column: 5 } }), ws);
+// plot(getTable(getRandomData(), { startAt: { row: 3, column: 5 } }), ws);
+// plot(getTable(getRandomData(), { startAt: { row: 15, column: 1 } }), ws);
+// plot(getTable(getRandomData(100), { startAt: { row: 15, column: 5 } }), ws);
+
+const groupByConfig: TableConfig<Person> = {
+  groupBy: (item) => item.FirstName[0]
+};
+plot(getTable(getRandomData(100), groupByConfig), ws);
 
 wb.xlsx.writeFile(`out/${faker.system.commonFileName('xlsx')}`);
