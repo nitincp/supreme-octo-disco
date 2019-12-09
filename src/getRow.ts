@@ -1,7 +1,8 @@
 import { Column, Position, Cell, Range } from "./index";
 
 export interface Row<T> {
-  cells: Cell<T>[]
+  cells: Cell<T>[];
+  outlineLevel?: number
 }
 
 export type Rows<T> = Row<T>[];
